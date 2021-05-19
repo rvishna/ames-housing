@@ -1,0 +1,23 @@
+[tool.poetry]
+name = "ames-housing"
+version = "0.1.0"
+description = "Example of using mlflow with hyperparameter tuning for the Ames Housing dataset"
+authors = ["Ram Vishnampet <rvishnampet@gmail.com>"]
+
+[tool.poetry.dependencies]
+python = ">=3.7.1,<4.0"
+scikit-learn = "0.23.2"
+sklearn-pandas = "^2.2.0"
+scikit-optimize = "^0.8.1"
+mlflow = "^1.17.0"
+
+[tool.poetry.dev-dependencies]
+black = "^21.5b1"
+pylint = "^2.8.2"
+pytest = "^6.2.4"
+isort = "^5.8.0"
+mypy = "^0.812"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
