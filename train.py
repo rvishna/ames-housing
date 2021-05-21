@@ -1,4 +1,5 @@
 """Script for training a regression model on the Ames Housing dataset."""
+from functools import partial
 from operator import itemgetter
 from typing import Any, Dict, List, Tuple
 
@@ -10,18 +11,11 @@ import pandas as pd
 import seaborn as sns
 from hpsklearn.components import (
     ada_boost_regression,
-    elasticnet,
     gradient_boosting_regression,
     random_forest_regression,
 )
 from hyperopt import hp
-from sklearn import (
-    impute,
-    linear_model,
-    model_selection,
-    pipeline,
-    preprocessing,
-)
+from sklearn import impute, model_selection, pipeline, preprocessing
 from sklearn.base import BaseEstimator
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.utils._testing import ignore_warnings
@@ -141,54 +135,116 @@ def plot_feature_importances(
     plt.savefig(filename)
 
 
+def objective(  # pylint:disable=invalid-name
+    regressor: BaseEstimator,
+    X: Any,
+    y: Any,
+    run_params: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Computes the objective function for `hyperopt`."""
+
+    run_name = (
+        "Iteration "
+        + str(run_params["iteration"])
+        + "/"
+        + str(run_params["max_iterations"])
+    )
+    run_params["iteration"] += 1
+    with mlflow.start_run(nested=True, run_name=run_name):
+        with ignore_warnings(category=ConvergenceWarning):
+            scores = model_selection.cross_val_score(regressor, X, y, scoring="r2")
+    return {
+        "loss": np.mean(-scores),
+        "loss_variance": np.var(-scores, ddof=1),
+        "status": hyperopt.STATUS_OK,
+    }
+
+
+def log_best_model(
+    model: BaseEstimator,
+    mapper: DataFrameMapper,
+    train_dataset: pd.DataFrame,
+    test_dataset: pd.DataFrame,
+    label: str,
+) -> None:
+    """Evaluates and logs the best model."""
+
+    pipe = pipeline.Pipeline([("mapper", mapper), ("regressor", model)])
+    with ignore_warnings(category=ConvergenceWarning):
+        pipe.fit(train_dataset, train_dataset[label])
+        if hasattr(model, "feature_importances_"):
+            plot_feature_importances(
+                model,
+                mapper.transformed_names_,
+                filename="feature_importances.png",
+            )
+            mlflow.log_artifact("feature_importances.png")
+        mlflow.sklearn.log_model(pipe, "model")
+        metrics = mlflow.sklearn.eval_and_log_metrics(
+            pipe, test_dataset, test_dataset[label], prefix="test_"
+        )
+        print(metrics["test_r2_score"])
+
+
+def log_data_artifacts(
+    train_dataset: pd.DataFrame, test_dataset: pd.DataFrame, label: str
+) -> None:
+    """Logs metadata about the dataset in the parent run."""
+
+    mlflow.log_metrics(
+        {
+            "training_size": len(train_dataset),
+            "test_size": len(test_dataset),
+            "num_features": len(train_dataset.columns),
+        }
+    )
+    mlflow.log_params({"label": label})
+
+
 def main() -> None:
     """Entrypoint for training script."""
 
     np.random.seed(0)
-    mlflow.sklearn.autolog()
+
+    mlflow.set_experiment("Automated house prices regression")
+    mlflow.sklearn.autolog(log_models=False, silent=True)
+
     dataset: pd.DataFrame = pd.read_csv("data/train.csv")
     dataset.drop(columns=["Id"], inplace=True)
     train_dataset, test_dataset = model_selection.train_test_split(
         dataset, test_size=0.2
     )
+
     label = "SalePrice"
-
-    def make_pipeline(regressor: BaseEstimator) -> pipeline.Pipeline:
-        mapper = create_mappper(
-            dataset,
-            label,
-            use_one_hot_encoding=isinstance(regressor, linear_model.ElasticNet),
-        )
-        return pipeline.Pipeline([("mapper", mapper), ("regressor", regressor)])
-
-    def objective(regressor: BaseEstimator) -> Dict[str, Any]:
-        pipe = make_pipeline(regressor)
-        with ignore_warnings(category=ConvergenceWarning):
-            scores = model_selection.cross_val_score(
-                pipe, train_dataset, train_dataset[label], scoring="r2"
-            )
-        return {"loss": -scores.mean(), "status": hyperopt.STATUS_OK}
+    mapper = create_mappper(dataset, label)
+    X_train = mapper.fit_transform(train_dataset)  # pylint:disable=invalid-name
+    y_train = train_dataset[label]
 
     search_space = hp.choice(
         "regressor",
         [
-            elasticnet("elastic_net", max_iter=1000),
             random_forest_regression("random_forest"),
             ada_boost_regression("ada_boost"),
             gradient_boosting_regression("grad_boosting"),
         ],
     )
-    result = hyperopt.fmin(
-        fn=objective, space=search_space, algo=hyperopt.tpe.suggest, max_evals=10
-    )
-    pipe = make_pipeline(hyperopt.space_eval(search_space, result))
-    with ignore_warnings(category=ConvergenceWarning):
-        pipe.fit(train_dataset, train_dataset[label])
-    r2_test = pipe.score(test_dataset, test_dataset[label])
-    r2_train = pipe.score(train_dataset, train_dataset[label])
-    print(r2_train, r2_test)
-    if hasattr(pipe.steps[1][1], "feature_importances_"):
-        plot_feature_importances(pipe.steps[1][1], pipe.steps[0][1].transformed_names_)
+
+    with mlflow.start_run():
+        run_params = {"iteration": 1, "max_iterations": 32}
+
+        mlflow.log_metric("max_iterations", run_params["max_iterations"])
+        log_data_artifacts(train_dataset, test_dataset, label)
+
+        result = hyperopt.fmin(
+            fn=partial(objective, X=X_train, y=y_train, run_params=run_params),
+            space=search_space,
+            algo=hyperopt.tpe.suggest,
+            max_evals=run_params["max_iterations"],
+        )
+
+        model = hyperopt.space_eval(search_space, result)
+        with mlflow.start_run(run_name="Best Model", nested=True):
+            log_best_model(model, mapper, train_dataset, test_dataset, label)
 
 
 if __name__ == "__main__":
