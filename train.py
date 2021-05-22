@@ -1,4 +1,5 @@
 """Script for training a regression model on the Ames Housing dataset."""
+import time
 from functools import partial
 from operator import itemgetter
 from typing import Any, Dict, List, Tuple
@@ -15,14 +16,18 @@ from hpsklearn.components import (
     random_forest_regression,
 )
 from hyperopt import hp
-from sklearn import impute, model_selection, pipeline, preprocessing
+from hyperopt.pyll import scope
+from sklearn import impute, model_selection, pipeline, preprocessing, ensemble
 from sklearn.base import BaseEstimator
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.utils._testing import ignore_warnings
 from sklearn_pandas import DataFrameMapper
+from ngboost import NGBRegressor
+
+from ngb_components import ngb_regression
 
 
-def create_mappper(
+def create_mapper(
     dataset: pd.DataFrame, label: str, use_one_hot_encoding: bool = False
 ) -> DataFrameMapper:
     """
@@ -124,7 +129,11 @@ def plot_feature_importances(
 
     _ = plt.figure(figsize=figsize)
     feature_importances = pd.DataFrame(
-        estimator.feature_importances_, index=feature_names, columns=["importance"]
+        estimator.feature_importances_
+        if estimator.feature_importances_.ndim == 1
+        else estimator.feature_importances_[0],
+        index=feature_names,
+        columns=["importance"],
     )
     feature_importances.sort_values("importance", ascending=False, inplace=True)
     feature_importances = feature_importances.head(n_top)
@@ -152,7 +161,9 @@ def objective(  # pylint:disable=invalid-name
     run_params["iteration"] += 1
     with mlflow.start_run(nested=True, run_name=run_name):
         with ignore_warnings(category=ConvergenceWarning):
+            tic = time.time()
             scores = model_selection.cross_val_score(regressor, X, y, scoring="r2")
+            mlflow.log_metric("duration", time.time() - tic)
     return {
         "loss": np.mean(-scores),
         "loss_variance": np.var(-scores, ddof=1),
@@ -172,7 +183,10 @@ def log_best_model(
     pipe = pipeline.Pipeline([("mapper", mapper), ("regressor", model)])
     with ignore_warnings(category=ConvergenceWarning):
         pipe.fit(train_dataset, train_dataset[label])
-        if hasattr(model, "feature_importances_"):
+        if (
+            hasattr(model, "feature_importances_")
+            and model.feature_importances_ is not None
+        ):
             plot_feature_importances(
                 model,
                 mapper.transformed_names_,
@@ -183,7 +197,7 @@ def log_best_model(
         metrics = mlflow.sklearn.eval_and_log_metrics(
             pipe, test_dataset, test_dataset[label], prefix="test_"
         )
-        print(metrics["test_r2_score"])
+        print(metrics)
 
 
 def log_data_artifacts(
@@ -216,7 +230,7 @@ def main() -> None:
     )
 
     label = "SalePrice"
-    mapper = create_mappper(dataset, label)
+    mapper = create_mapper(dataset, label)
     X_train = mapper.fit_transform(train_dataset)  # pylint:disable=invalid-name
     y_train = train_dataset[label]
 
@@ -225,7 +239,8 @@ def main() -> None:
         [
             random_forest_regression("random_forest"),
             ada_boost_regression("ada_boost"),
-            gradient_boosting_regression("grad_boosting"),
+            gradient_boosting_regression("grad_boosting", loss="huber"),
+            ngb_regression("ng_boosting", verbose=False),
         ],
     )
 

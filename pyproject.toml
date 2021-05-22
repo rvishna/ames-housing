@@ -12,6 +12,7 @@ mlflow = "*"
 seaborn = "*"
 hyperopt = "*"
 hpsklearn = {git = "https://github.com/hyperopt/hyperopt-sklearn"}
+ngboost = "^0.3.10"
 
 [tool.poetry.dev-dependencies]
 black = "*"
@@ -19,6 +20,8 @@ pylint = "*"
 pytest = "*"
 isort = "*"
 mypy = "*"
+ipython = "^7.23.1"
+jupyter = "^1.0.0"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
